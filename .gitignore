@@ -1,0 +1,31 @@
+
+# Python Environment
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Data Directories
+zeek_logs/
+temp_uploads/
+backend/data/
+
+# Generated Data
+*.xlsx
+*.csv
+!backend/data/*.csv  # Allow CSVs in data dir if needed (but ignore root CSVs)
+segments.csv
+inventory.csv
+master_navv_inventory.csv
+
+# Logs
+*.log
+
+# Debug Scripts
+debug_*.py
+verify_join.py
+repro.py
+
+# Editor
+.vscode/
+.idea/

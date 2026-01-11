@@ -1,0 +1,5 @@
+streamlit
+polars>=0.20.0
+pandas>=2.0.0
+plotly
+xlsxwriter
