@@ -92,6 +92,7 @@ class ZeekRunner:
                         
             # Close stdin to signal EOF to Zeek
             process.stdin.close()
+            process.stdin = None # Prevent communicate from flushing closed stdin
             
             # Wait for completion
             stdout, stderr = process.communicate()

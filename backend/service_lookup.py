@@ -43,7 +43,14 @@ class ServiceLookup:
         print(f"Downloading Nmap Services from {NMAP_SERVICES_URL}...")
         try:
             req = urllib.request.Request(NMAP_SERVICES_URL, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req) as response:
+            
+            # Bypass SSL check for MacOS
+            import ssl
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            
+            with urllib.request.urlopen(req, context=ctx) as response:
                 content = response.read().decode('utf-8', errors='ignore')
             
             new_db = {}
@@ -115,24 +122,26 @@ class ServiceLookup:
             proto_val = str(proto).lower()
             key = f"{proto_val}/{port_val}"
             
-            # Tier 1: Override
+            # Tier 1: Override -> 0
             if key in self.overrides:
-                return (str(self.overrides[key]), "Manual Override")
+                return (str(self.overrides[key]), 0)
             
-            # Tier 2: Zeek
+            # Tier 2: Zeek -> 1
             if zeek_service and isinstance(zeek_service, str):
                 z = zeek_service.strip()
                 if z and z != "-" and z.lower() != "unknown" and z != "(empty)":
-                    return (z, "Zeek Analysis")
+                    return (z, 1)
             
-            # Tier 3: Nmap
+            # Tier 3: Nmap -> 2
             if key in self.nmap_db:
-                return (str(self.nmap_db[key]), "Nmap Lookup")
+                svc = str(self.nmap_db[key])
+                if svc.lower() != "unknown":
+                    return (svc, 2)
                 
-            # Tier 4: Fallback
-            return (f"{proto_val.upper()}/{port_val}", "Unknown/Fallback")
+            # Tier 4: Fallback -> 3
+            return (f"{proto_val.upper()}/{port_val}", 3)
             
         except Exception:
-            return (f"{str(proto).upper()}/{str(port)}", "Error/Fallback")
+            return (f"{str(proto).upper()}/{str(port)}", 3)
 
 service_lookup = ServiceLookup()

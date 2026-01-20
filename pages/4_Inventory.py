@@ -16,9 +16,7 @@ if st.sidebar.button("⬇️ Download Template"):
     # Generate template
     template = pl.DataFrame({
         "IP": ["192.168.1.10"],
-        "Name": ["Workstation-01"],
-        "Location": ["Building A"],
-        "Description": ["HR PC"]
+        "Name": ["Workstation-01"]
     })
     st.sidebar.download_button(
         "Download Template",
@@ -36,19 +34,34 @@ enip_log_path = os.path.join("zeek_logs", "enip.log")
 inventory_path = None
 
 if uploaded_file:
-    # Save temp
-    inventory_path = "inventory.csv"
-    with open(inventory_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-    st.sidebar.success("Inventory Loaded")
+    try:
+        # Validate before saving
+        df_val = pl.read_csv(uploaded_file, ignore_errors=True)
+        required = {"IP", "Name"}
+        missing = required - set(df_val.columns)
+        
+        if not missing:
+            uploaded_file.seek(0)
+            inventory_path = "inventory.csv"
+            with open(inventory_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+            st.sidebar.success("Inventory Loaded")
+        else:
+            st.sidebar.error(f"Missing columns: {missing}. Required: IP, Name. Please use the template.")
+            
+    except Exception as e:
+         st.sidebar.error(f"Invalid file: {e}")
 elif os.path.exists("inventory.csv"):
     inventory_path = "inventory.csv"
     st.sidebar.info("Using existing inventory.csv")
 
 # Load Mode
 if st.button("🔄 Refresh / Build Master Asset List"):
-    with st.spinner("Correlating Manual Inventory with Behavioral Logs..."):
-        if os.path.exists(conn_log_path):
+    if os.path.exists(conn_log_path):
+        with st.status("Building Master Asset List...", expanded=True) as status:
+            status.write("Correlating Activity Logs (Conn/DHCP/DNS/Enip)...")
+            
+            # We call ingest which does the heavy lifting
             df = inv.ingest_model(
                 inventory_csv=inventory_path, 
                 conn_log=conn_log_path, 
@@ -57,15 +70,22 @@ if st.button("🔄 Refresh / Build Master Asset List"):
                 ntlm_log=ntlm_log_path,
                 enip_log=enip_log_path
             )
+            
+            status.write("Finalizing Asset Profiles...")
             # Save to session (or disk - for now disk is easier for statelessness between re-runs if we save result)
             # We'll rely on session state for inter-interaction persistence if needed, but here we just re-run.
             st.session_state['master_asset_list'] = df.to_pandas() # Convert to pandas for st.data_editor support
-        else:
-            st.error("No `conn.log` found. Please ingest a PCAP first.")
+            
+            status.update(label="Inventory Build Complete", state="complete", expanded=False)
+    else:
+        st.error("No `conn.log` found. Please ingest a PCAP first.")
 
 # Display
 if 'master_asset_list' in st.session_state:
     st.subheader("Master Asset List")
+    
+    # Filter
+    scope_filter = st.radio("Scope Filter", ["All", "Private IP", "Public IP"], horizontal=True)
     
     # NEW: Displaying Asset Profile dimensions
     # Columns expected: 'ip', 'network_scope', 'segment', 'final_classification', 'behavioral_role', 'final_name', 'status'
@@ -82,6 +102,19 @@ if 'master_asset_list' in st.session_state:
     from backend.segment_manager import SegmentResolver
     seg_res = SegmentResolver()
     
+    # Sort by IP (Mixed IPv4/IPv6) using Pandas (handled better for arbitrary precision ints)
+    def ip_sort_key(ip_str):
+        import ipaddress
+        try:
+             return int(ipaddress.ip_address(ip_str))
+        except:
+             return 0
+             
+    # Create temp column in Pandas, Sort, Drop
+    df['ip_int'] = df['ip'].apply(ip_sort_key)
+    df = df.sort_values('ip_int')
+    df = df.drop(columns=['ip_int'])
+
     # Convert Pandas -> Polars for robust manipulation
     p_df = pl.from_pandas(df)
     
@@ -101,7 +134,14 @@ if 'master_asset_list' in st.session_state:
             return seg_res.PURDUE_LEVELS.get(v_int, "Unknown")
         except:
             return "Unknown"
-    
+            
+    # Apply Filters
+    if scope_filter == "Private IP":
+        # Internet is 8. So < 8.
+        p_df = p_df.filter(pl.col("purdue_level") < 8)
+    elif scope_filter == "Public IP":
+        p_df = p_df.filter(pl.col("purdue_level") >= 8)
+
     display_df = p_df.with_columns([
         pl.col("purdue_level").fill_null(0).map_elements(map_lvl, return_dtype=pl.String).alias("Purdue Level"),
         pl.col("behavior_level").fill_null(0).map_elements(map_lvl, return_dtype=pl.String).alias("Behavioral Level")
@@ -170,3 +210,43 @@ if 'master_asset_list' in st.session_state:
         #     "dhcp_client_fqdn": st.column_config.TextColumn("DHCP FQDN")
         # }
     )
+
+st.divider()
+with st.expander("ℹ️ How it Works: Asset Identification Logic"):
+    st.markdown("""
+    ### 1. Data Aggregation
+    This module correlates multiple Zeek logs to build a unified Asset Profile for every IP:
+    *   **Manual Inventory**: User-uploaded CSV (Highest Priority).
+    *   **DHCP Logs**: Provides Hostnames, FQDNs, and MAC addresses.
+    *   **Name Resolution**: DNS (PTR), NTLM (Hostnames), and ENIP (Industrial Protocol Identities).
+    *   **Activity Logs (`conn.log`)**: Determines active presence and roles.
+
+    ### 2. Identity Cascading (Waterfall Fallback)
+    The "Final Name" is determined by checking sources in this specific order of reliability:
+    1.  **Special IP Types** (e.g., Multicast, Broadcast, Link-Local)
+    2.  **Manual Inventory Match** (User Overrides)
+    3.  **DHCP Identity** (Computed from Hostname + Domain)
+    4.  **Industrial Protocol Name** (EtherNet/IP Identity)
+    5.  **Broadcast Name** (NetBIOS / LLMNR / NTLM)
+    6.  **DNS Name** (Reverse Lookup)
+    7.  **Public Internet** (If IP is Public, labeled "INTERNET")
+    8.  **Fallback**: "Unknown Device in [Segment Name]"
+
+    ### 3. Behavioral Enrichment
+    *   **Role Detection**: Infers roles (PLC, Web Server, DNS) based on open ports found in traffic.
+    *   **Switch Detection**: If multiple IPs are seen sharing the same MAC address, the device is flagged as a "Likely Switch/Router".
+    *   **L2 Leak Detection**: If a Public IP is seen with a local MAC address, it is flagged as a misconfiguration.
+
+    ### 4. Data Import Format (CSV)
+    When uploading a manual inventory, the CSV must use the following headers:
+    *   **IP** (Required): The IP address of the asset.
+    *   **Name** (Required): The friendly name for the asset.
+    *   **Location** (Optional): Physical or logical location.
+    *   **Description** (Optional): Additional notes.
+
+    *Example*:
+    ```csv
+    IP,Name,Location,Description
+    192.168.1.10,HMI-01,Control Room,Main HMI
+    ```
+    """)

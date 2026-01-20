@@ -12,14 +12,52 @@ zeek = ZeekRunner()
 
 # Sidebar
 st.sidebar.header("Segment Actions")
+
+# Template Download
+template_csv = "Name,CIDR,Level\nExample Segment,192.168.10.0/24,4"
+st.sidebar.download_button(
+    label="Download Template CSV",
+    data=template_csv,
+    file_name="segment_template.csv",
+    mime="text/csv"
+)
+
 uploaded_segments = st.sidebar.file_uploader("Upload Segments (CSV)", type=["csv"])
 
 segments_path = "segments.csv"
 
 if uploaded_segments:
-    with open(segments_path, "wb") as f:
-        f.write(uploaded_segments.getbuffer())
-    st.sidebar.success("Segments Loaded")
+    try:
+        # Validate before saving
+        # Polars read_csv might read bytes directly
+        # We need to make sure we don't consume it such that we can't save it, or we save from the dataframe
+        
+        # Read to validate
+        df_val = pl.read_csv(uploaded_segments, ignore_errors=True)
+        required = {"Name", "CIDR", "Level"}
+        missing = required - set(df_val.columns)
+        
+        if not missing:
+            # Valid, allow save
+            # Reset pointer if read_csv moved it? Polars usually reads from bytes so it might not affect the UploadedFile stream position if it treats it as bytes, 
+            # but streamlit UploadedFile acts like a file. safer to seek(0) if needed or just write the bytes we have.
+            # actually we can just use `uploaded_segments.getbuffer()` as before, assuming it's still available.
+            uploaded_segments.seek(0)
+            with open(segments_path, "wb") as f:
+                f.write(uploaded_segments.getbuffer())
+            st.sidebar.success("Segments Loaded")
+        else:
+            st.sidebar.error(f"Missing columns: {missing}. Please use the template.")
+            
+    except Exception as e:
+        st.sidebar.error(f"Invalid file: {e}")
+
+st.sidebar.divider()
+st.sidebar.header("🎨 Color Picker")
+st.sidebar.caption("Pick a color to copy its HEX code.")
+picked_color = st.sidebar.color_picker("Picker", "#00f900", key="sidebar_color_picker")
+st.sidebar.code(picked_color, language="text")
+
 
 # Current Segments
 current_df = seg.load_segments(segments_path)
@@ -147,6 +185,7 @@ with col2:
                     pl.col("column_5").alias("dst_ip")
                 ]).collect()
                 unique_ips = pl.concat([ips.select("ip"), ips.select(pl.col("dst_ip").alias("ip"))]).unique()
+                st.info(f"Scanning {unique_ips.height} unique IPs...")
                 proposed = seg.auto_discover(unique_ips)
                 
                 # 2. Load Existing (to check duplicates)
@@ -156,12 +195,12 @@ with col2:
                 else:
                     existing = pl.DataFrame({"Name": [], "CIDR": [], "Level": []}, schema={"Name": pl.String, "CIDR": pl.String, "Level": pl.Int32})
                 
-                # Ensure types for join/filter
-                # existing CIDR vs proposed CIDR
-                
+                # Check Overlap
+                st.info(f"Proposed: {proposed.height} segments. Existing: {existing.height} segments.")
+
                 # Filter proposed where CIDR is not in existing["CIDR"]
-                # Polars anti-join or filter is_in
-                new_segs = proposed.filter(~pl.col("CIDR").is_in(existing["CIDR"]))
+                # Use Anti-Join for robustness and performance
+                new_segs = proposed.join(existing, on="CIDR", how="anti")
                 
                 if new_segs.height > 0:
                     # Concat
@@ -170,9 +209,47 @@ with col2:
                     st.success(f"Added {new_segs.height} new segments! Reloading...")
                     st.rerun()
                 else:
-                    st.info("No new unique segments found.")
+                    st.warning("No new unique segments found (All proposed segments already verify against existing list).")
                     
             except Exception as e:
                 st.error(f"Discovery failed: {e}")
         else:
             st.error("No `conn.log` found.")
+
+st.divider()
+with st.expander("ℹ️ How it Works: Segmentation & Autodiscovery"):
+    st.markdown("""
+    ### 1. Segmentation Logic
+    Segments are defined by **CIDR** blocks (e.g., `192.168.10.0/24`) and assigned a **Purdue Level** (0-8) for risk classification.
+    *   **Matching**: IPs are matched to the specific subnet they belong to.
+    *   **Visualization**: Colors are auto-assigned based on the Purdue Level (Blue=OT, Green/Orange=IT/DMZ, Grey=Internet).
+
+    ### 2. Autodiscovery Process
+    When you run "Auto-Discovery", the system performs the following:
+    1.  **Scan**: Reads `conn.log` to find all unique IP addresses involved in traffic.
+    2.  **Group**: Aggregates these IPs into `/24` subnets (Standard Class C).
+    3.  **Propose**: Creates a proposed segment for every `/24` block containing active IPs.
+        *   *Private IPs*: Default to Level 4 (Site Operations).
+        *   *Public IPs*: Default to Level 8 (Internet).
+    4.  **Filter**: Removes any proposed segments that conflict with or duplicate your existing definitions using an **Anti-Join**.
+
+    ### 3. Usage
+    *   **Manual Override**: You can upload a `segments.csv` to enforce your own strict network boundaries.
+    *   **Hybrid**: You can start with Auto-Discovery to find active networks, then manually refine the Names and Levels in the editor.
+
+    ### 4. Data Import Format (CSV)
+    *   **Name** (Required): Segment label.
+    *   **CIDR** (Required): Network range (e.g., `10.0.0.0/24`).
+    *   **Level** (Required): Integer (1-8) representing the Purdue Level.
+
+    ### 5. Purdue Level Reference
+    Use these integer codes in your CSV `Level` column:
+    *   **8**: Internet (Public)
+    *   **7**: IT DMZ
+    *   **6**: IT Enterprise
+    *   **5**: OT DMZ
+    *   **4**: Site Operations / Logistics
+    *   **3**: Supervisory Control
+    *   **2**: Basic Control
+    *   **1**: Physical Process
+    """)

@@ -85,8 +85,25 @@ class NavvAnalysisEngine:
         # "Put the counts as the first column and sort largest to smallest"
         df_lazy = raw.group_by(group_cols).agg(pl.len().alias("count"))
         
-        # Collect for Joining with Inventory (which is Eager)
         df = df_lazy.collect()
+
+        # 5.1 Service Resolution (Nmap 2nd Tier)
+        # Apply Nmap/Fallback lookup to fill in missing Zeek services
+        def resolve_svc_struct(s):
+            name, conf = service_lookup.resolve_service(
+                s["dst_port"],
+                s["proto"],
+                s["service"]
+            )
+            return {"service": name, "service_confidence": conf}
+
+        if "dst_port" in df.columns and "proto" in df.columns and "service" in df.columns:
+            svc_schema = pl.Struct({"service": pl.String, "service_confidence": pl.Int32})
+            df = df.with_columns(
+                pl.struct(["dst_port", "proto", "service"])
+                  .map_elements(resolve_svc_struct, return_dtype=svc_schema)
+                  .alias("svc_struct")
+            ).drop("service").unnest("svc_struct")
         
         # 5.5 Lookup Names (RESTORED with STRICT TYPES)
         assets = self.inv.get_master_list()
@@ -97,26 +114,79 @@ class NavvAnalysisEngine:
         
         # Ensure schema for join
         if "final_name" not in assets.columns:
-            assets = assets.with_columns(pl.lit("Unknown").alias("final_name"))
+            assets = assets.with_columns([
+                pl.lit("Unknown").alias("final_name"),
+                pl.lit(8).cast(pl.Int32).alias("name_confidence") # Default low confidence
+            ])
             
         # THE FIX: Force final_name to String to prevent Int64 mismatch
         assets = assets.with_columns(pl.col("final_name").cast(pl.String))
-        assets_lookup = assets.select([pl.col("ip").cast(pl.String), pl.col("final_name")])
+        
+        # Select columns for join
+        assets_lookup = assets.select([
+            pl.col("ip").cast(pl.String), 
+            pl.col("final_name"),
+            pl.col("name_confidence")
+        ])
 
         # Join Src Name
-        df = df.join(assets_lookup, left_on="src_ip", right_on="ip", how="left").rename({"final_name": "Src Name Raw"})
+        df = df.join(assets_lookup, left_on="src_ip", right_on="ip", how="left") \
+               .rename({"final_name": "Src Name Raw", "name_confidence": "src_name_conf"})
         
         # Join Dst Name
-        df = df.join(assets_lookup, left_on="dst_ip", right_on="ip", how="left").rename({"final_name": "Dst Name Raw"})
+        df = df.join(assets_lookup, left_on="dst_ip", right_on="ip", how="left") \
+               .rename({"final_name": "Dst Name Raw", "name_confidence": "dst_name_conf"})
         
-        # 5.6 Resolve Segments (REMOVED - SIMPLIFIED)
-        # User requested to undo "Unknown device in segment X" convention.
+        # 5.6 Resolve Segments
+        # Create lookup of unique IPs to minimize python loop overhead
+        unique_ips = pl.concat([
+            df.select(pl.col("src_ip").alias("ip")), 
+            df.select(pl.col("dst_ip").alias("ip"))
+        ]).unique()
         
+        # Resolve (returns Struct column)
+        resolved_struct = self.seg.resolve_ip(unique_ips["ip"])
+        
+        # Unpack into DataFrame
+        val_df = unique_ips.with_columns(resolved_struct.alias("seg_data")).unnest("seg_data")
+        
+        # Join Src Segments
+        # Rename columns to avoid collision
+        src_lookup = val_df.select([
+             pl.col("ip"),
+             pl.col("Name").alias("src_segment"),
+             pl.col("Level").alias("src_level"),
+             pl.col("Color").alias("src_color"),
+             pl.col("FontColor").alias("src_font")
+        ])
+        df = df.join(src_lookup, left_on="src_ip", right_on="ip", how="left")
+        
+        # Join Dst Segments
+        dst_lookup = val_df.select([
+             pl.col("ip"),
+             pl.col("Name").alias("dst_segment"),
+             pl.col("Level").alias("dst_level"),
+             pl.col("Color").alias("dst_color"),
+             pl.col("FontColor").alias("dst_font")
+        ])
+        df = df.join(dst_lookup, left_on="dst_ip", right_on="ip", how="left")
+
         # 5.7 Finalize Names
-        # Use Inventory Name if found, else "Unknown Device"
+        # Use Inventory Name if found, else "Unknown Device" - Set confidence to 8 (lowest) if null
         df = df.with_columns([
             pl.col("Src Name Raw").fill_null("Unknown Device").alias("Src Name"),
-            pl.col("Dst Name Raw").fill_null("Unknown Device").alias("Dst Name")
+            pl.col("Dst Name Raw").fill_null("Unknown Device").alias("Dst Name"),
+            pl.col("src_name_conf").fill_null(8).alias("src_name_conf"),
+            pl.col("dst_name_conf").fill_null(8).alias("dst_name_conf"),
+            # Fill null segments? (Shouldn't be null due to resolve_ip logic, but for safety)
+            pl.col("src_segment").fill_null("Unknown"),
+            pl.col("dst_segment").fill_null("Unknown"),
+            pl.col("src_level").fill_null(0),
+            pl.col("dst_level").fill_null(0),
+            pl.col("src_color").fill_null("#ffffff"),
+            pl.col("src_font").fill_null("#000000"),
+            pl.col("dst_color").fill_null("#ffffff"),
+            pl.col("dst_font").fill_null("#000000"),
         ])
 
         # 6. Reorder and Sort
@@ -124,14 +194,17 @@ class NavvAnalysisEngine:
         
         ordered_cols = ["count"]
         if "src_ip" in group_cols:
-             ordered_cols.extend(["src_ip", "Src Name"])
+             ordered_cols.extend(["src_ip", "Src Name", "src_segment", "src_color", "src_font", "src_name_conf"])
         if "dst_ip" in group_cols:
-             ordered_cols.extend(["dst_ip", "Dst Name"])
+             ordered_cols.extend(["dst_ip", "Dst Name", "dst_segment", "dst_color", "dst_font", "dst_name_conf"])
              
         # Add the rest
         for col in group_cols:
             if col not in ["src_ip", "dst_ip"]:
                 ordered_cols.append(col)
+                # Add confidence next to service
+                if col == "service":
+                    ordered_cols.append("service_confidence")
                 
         # Select existing cols only
         final_cols = [c for c in ordered_cols if c in df.columns]

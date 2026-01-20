@@ -3,6 +3,9 @@ import polars as pl
 import pandas as pd
 import plotly.graph_objects as go
 import os
+
+# Increase Styler limit for large datasets
+pd.set_option("styler.render.max_elements", 1_000_000)
 from backend.navv_analysis_engine import NavvAnalysisEngine
 from backend.inventory_manager import InventoryHarmonizer
 from backend.segment_manager import SegmentResolver
@@ -18,17 +21,23 @@ seg = SegmentResolver()
 
 # Load Context (Inventory & Segments)
 # In a real app, we'd cache these or load from the saved CSVs
-dhcp_log = os.path.join(zeek.logs_dir, "dhcp.log")
-dns_log = os.path.join(zeek.logs_dir, "dns.log")
-conn_log_path = os.path.join(zeek.logs_dir, "conn.log")
-
-inv.ingest_model(
-    inventory_csv="master_navv_inventory.csv" if os.path.exists("master_navv_inventory.csv") else "inventory.csv",
-    conn_log=conn_log_path,
-    dhcp_log=dhcp_log,
-    dns_log=dns_log
-)
-seg.load_segments("segments.csv")
+with st.status("Loading Data Environment...", expanded=True) as status:
+    dhcp_log = os.path.join(zeek.logs_dir, "dhcp.log")
+    dns_log = os.path.join(zeek.logs_dir, "dns.log")
+    conn_log_path = os.path.join(zeek.logs_dir, "conn.log")
+    
+    status.write("Ingesting Activity Logs (DHCP, DNS, Conn)...")
+    inv.ingest_model(
+        inventory_csv="master_navv_inventory.csv" if os.path.exists("master_navv_inventory.csv") else "inventory.csv",
+        conn_log=conn_log_path,
+        dhcp_log=dhcp_log,
+        dns_log=dns_log
+    )
+    
+    status.write("Loading Network Segments...")
+    seg.load_segments("segments.csv")
+    
+    status.update(label="Environment Ready", state="complete", expanded=False)
 
 engine = NavvAnalysisEngine(inv, seg)
 conn_log = os.path.join(zeek.logs_dir, "conn.log")
@@ -69,63 +78,60 @@ if 'analysis_df' in st.session_state:
     
     st.markdown("---")
     
-    # Tabs: Visualization | Data
-    tab_viz, tab_data = st.tabs(["📊 Visualization", "📋 Detailed Data"])
+    st.subheader("Traffic Analysis Table")
     
-    with tab_viz:
-        if "src_zone" in df.columns and "dst_zone" in df.columns:
-            st.subheader("Traffic Flow (Sankey)")
-            # Aggregate for Sankey: Source Zone -> Dest Zone
-            # Group by src_zone, dst_zone
-            
-            # We need to filter out None zones or fill them
-            sankey_data = df.groupby(['src_zone', 'dst_zone']).agg({'count': 'sum'}).reset_index()
-            sankey_data = sankey_data.fillna("Unknown")
-            
-            # Create Node List
-            all_nodes = list(pd.concat([sankey_data['src_zone'], sankey_data['dst_zone']]).unique())
-            node_map = {name: i for i, name in enumerate(all_nodes)}
-            
-            # Links
-            links = {
-                'source': sankey_data['src_zone'].map(node_map),
-                'target': sankey_data['dst_zone'].map(node_map),
-                'value': sankey_data['count']
-            }
-            
-            import plotly.graph_objects as go
-            
-            fig = go.Figure(data=[go.Sankey(
-                node = dict(
-                  pad = 15,
-                  thickness = 20,
-                  line = dict(color = "black", width = 0.5),
-                  label = all_nodes,
-                  color = "blue"
-                ),
-                link = dict(
-                  source = links['source'],
-                  target = links['target'],
-                  value = links['value']
-              ))])
-            
-            fig.update_layout(title_text="Network Traffic Flows (Zone to Zone)", font_size=10)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-             st.info("Visualizations Disabled: Data not enriched with Zones/Segments.")
+    # Add basic filters
+    display_df = df.copy()
+    if "risk_alert" in df.columns:
+        risk_filter = st.checkbox("Show Only Risks")
+        if risk_filter:
+                display_df = display_df[display_df['risk_alert'] == 'CRITICAL']
 
-    with tab_data:
-        st.subheader("Traffic Table")
+    # Apply Styling
+    def highlight_cells(row):
+        # Default
+        styles = [''] * len(row)
         
-        # Color Risk Rows?
-        # Styler is slow for large data. 
-        # Just show the dataframe.
+        # Map index to column name for easy access
+        # source
+        src_bg = row.get('src_color', '#ffffff')
+        src_font = row.get('src_font', '#000000')
+        dst_bg = row.get('dst_color', '#ffffff')
+        dst_font = row.get('dst_font', '#000000')
         
-        # Add basic filters
-        display_df = df
-        if "risk_alert" in df.columns:
-            risk_filter = st.checkbox("Show Only Risks")
-            if risk_filter:
-                 display_df = df[df['risk_alert'] == 'CRITICAL']
-        
-        st.dataframe(display_df, use_container_width=True) 
+        for i, col in enumerate(row.index):
+            if col in ['src_ip', 'Src Name']:
+                styles[i] = f'background-color: {src_bg}; color: {src_font}'
+            elif col in ['dst_ip', 'Dst Name']:
+                styles[i] = f'background-color: {dst_bg}; color: {dst_font}'
+        return styles
+
+    st.dataframe(
+        display_df.style.apply(highlight_cells, axis=1), 
+        use_container_width=True,
+        column_config={
+            "src_color": None, "src_font": None, "src_segment": None, 
+            "dst_color": None, "dst_font": None, "dst_segment": None,
+            "src_name_conf": st.column_config.NumberColumn("Src Conf", help="Source Name Confidence (1=High, 8=Low)"),
+            "dst_name_conf": st.column_config.NumberColumn("Dst Conf", help="Dest Name Confidence (1=High, 8=Low)"),
+            "service_confidence": st.column_config.NumberColumn("Svc Conf", help="Service Confidence (1=High, 8=Low)"),
+        }
+    )
+
+st.divider()
+with st.expander("ℹ️ How it Works: Traffic Analysis & Enrichment"):
+    st.markdown("""
+    ### 1. The Analysis Engine
+    This module ingests raw `conn.log` data and enriches it with the context built in the **Ingest** and **Inventory** phases.
+    
+    ### 2. Data Enrichment Fields
+    *   **Source / Destination Names**: Resolved from your Master Asset List (Inventory).
+        *   *Confidence Factor*: A score (1-8) indicating how the name was found (1=Manual Override, 8=Unknown).
+    *   **Segments & Zones**: Active IPs are mapped to your definitions in the **Segments** page.
+        *   *Color Coding*: Cells are colored by their Purdue Level (Blue=OT, Green=IT, Grey=Public).
+    *   **Services**: Protocol and Service identification (e.g., `HTTP`, `ENIP`, `S7Comm`) is enhanced using Nmap logic where Zeek falls short.
+
+    ### 3. Visualizations
+    *   **Sankey Diagram**: Shows the high-level volume of traffic flowing between **Zones** (e.g., "Site Operations" -> "Internet").
+    *   **Traffic Table**: Detailed record of every conversation, with color-coded context for rapid risk assessment.
+    """)

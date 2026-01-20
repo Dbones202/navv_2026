@@ -4,6 +4,11 @@ import time
 import datetime
 from zeek_runner import ZeekRunner
 
+import sys
+import subprocess
+
+
+
 st.set_page_config(page_title="Ingest PCAP", page_icon="📥", layout="wide")
 st.title("📥 Ingest: Process PCAP")
 
@@ -12,7 +17,78 @@ zeek = ZeekRunner()
 # Main Area
 st.subheader("1. Input Source")
 
-local_path = st.text_input("Local File Path (Absolute Path)", placeholder="E:\\path\\to\\file.pcap")
+if "ingest_file_path" not in st.session_state:
+    st.session_state["ingest_file_path"] = ""
+
+def open_file_dialog():
+    script = """
+import tkinter as tk
+from tkinter import filedialog
+import sys
+import os
+
+# Suppress stderr to keep clean for Streamlit unless we want to capture it
+# But we will capture it in the subprocess call
+try:
+    root = tk.Tk()
+    root.withdraw()
+    root.wm_attributes('-topmost', 1)
+    
+    # Check if we can open a window
+    # On Linux, this might fail if no X11/Wayland
+    
+    file_path = filedialog.askopenfilename(
+        title="Select PCAP File",
+        filetypes=[("PCAP Files", "*.pcap"), ("All Files", "*.*")]
+    )
+    print(file_path, end="")
+    root.destroy()
+except Exception as e:
+    # Print error to stderr so we can catch it
+    sys.stderr.write(str(e))
+    sys.exit(1)
+"""
+    try:
+        # Run the script in a separate process
+        # Use subprocess.run to capture stderr/stdout
+        result = subprocess.run(
+            [sys.executable, "-c", script], 
+            capture_output=True, 
+            text=True,
+            check=False # Don't raise immediately, check returncode
+        )
+        
+        if result.returncode == 0:
+            file_path = result.stdout.strip()
+            if file_path:
+                st.session_state["ingest_file_path"] = file_path
+        else:
+            # Command failed
+            err_msg = result.stderr.strip()
+            if "no display name" in err_msg.lower():
+                st.error("Cannot open file dialog: No display found (Headless environment?). Please enter path manually.")
+            else:
+                st.error(f"Error opening file dialog: {err_msg}")
+                
+    except Exception as e:
+        st.error(f"System error: {e}")
+
+c_input, c_btn = st.columns([4, 1])
+
+with c_input:
+    # Use key to bind directly to session state
+    local_path = st.text_input(
+        "Local File Path (Absolute Path)", 
+        placeholder="/path/to/file.pcap", 
+        key="ingest_file_path"
+    )
+
+with c_btn:
+    # Add vertical spacing to align button with input box text
+    st.write("") 
+    st.write("")
+    st.button("📂 Browse Files", on_click=open_file_dialog)
+
 st.caption("Reads directly from disk. No file size limits.")
 
 active_file = None
@@ -61,7 +137,7 @@ if active_file:
                     st.code(output)
                     
         except Exception as e:
-             st.warning("⚠️ Process interrupted.")
+             st.warning(f"⚠️ Process interrupted: {e}")
 
 st.subheader("3. Log Quality Status")
 if os.path.exists(zeek.logs_dir):

@@ -4,6 +4,7 @@ import time
 import datetime
 import urllib.request
 import re
+import ssl
 
 DATA_DIR = os.path.dirname(os.path.abspath(__file__)) + "/data"
 MANUF_URLS = [
@@ -41,7 +42,13 @@ class OUILookup:
             try:
                 # Add headers to avoid 403s on some sites
                 req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req) as response:
+                
+                # Bypass SSL check for MacOS
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                
+                with urllib.request.urlopen(req, context=ctx) as response:
                     content = response.read().decode('utf-8', errors='ignore')
                     source_used = url
                     print(f"Success: Downloaded from {url}")

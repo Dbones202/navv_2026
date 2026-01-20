@@ -18,12 +18,27 @@ class InventoryHarmonizer:
         # Manual Inventory
         if inventory_csv and os.path.exists(inventory_csv):
             try:
-                manual_df = pl.scan_csv(inventory_csv).select([
+                # Read with flexible schema
+                q = pl.scan_csv(inventory_csv)
+                cols = q.collect_schema().names()
+                
+                selects = [
                     pl.col("IP").alias("ip"),
-                    pl.col("Name").alias("manual_name"),
-                    pl.col("Location").alias("location"),
-                    pl.col("Description").alias("description")
-                ])
+                    pl.col("Name").alias("manual_name")
+                ]
+                
+                if "Location" in cols:
+                    selects.append(pl.col("Location").alias("location"))
+                else:
+                    selects.append(pl.lit(None).cast(pl.String).alias("location"))
+                    
+                if "Description" in cols:
+                    selects.append(pl.col("Description").alias("description"))
+                else:
+                    selects.append(pl.lit(None).cast(pl.String).alias("description"))
+                
+                manual_df = q.select(selects)
+                
                 # Ensure IP is string
                 manual_df = manual_df.with_columns(pl.col("ip").cast(pl.String))
             except Exception as e:
@@ -237,13 +252,19 @@ class InventoryHarmonizer:
                         ).select([
                             pl.col(f"column_{ip_idx+1}").alias("ip"),
                             pl.col(f"column_{query_idx+1}").alias("broadcast_name")
-                        ]).filter(pl.col("broadcast_name").str.len_chars() > 0)
+                        ]).filter(
+                            (pl.col("broadcast_name").str.len_chars() > 0) &
+                            (pl.col("broadcast_name") != "*")
+                        )
 
                     # Standard DNS (Fallback)
                     dns_ptr_df = q_dns.select([
                         pl.col(f"column_{ip_idx+1}").alias("ip"),
                         pl.col(f"column_{query_idx+1}").alias("dns_name")
-                    ]).filter(pl.col("dns_name").str.len_chars() > 0).unique("ip")
+                    ]).filter(
+                        (pl.col("dns_name").str.len_chars() > 0) & 
+                        (pl.col("dns_name") != "*")
+                    ).unique("ip")
             except: pass
 
         # 2. NTLM (Treat as Broadcast/Local Identity)
@@ -428,6 +449,19 @@ class InventoryHarmonizer:
                 # Fallback to Segment Name
                 pl.col("segment_fallback_name")
             ]).cast(pl.String).alias("final_name"),
+            
+            # Name Confidence (0=High, 7=Low)
+            pl.when(pl.col("special_name").is_not_null()).then(0)
+              .when(pl.col("manual_name").is_not_null()).then(1)
+              .when(pl.col("dhcp_computed_name").is_not_null()).then(2)
+              .when(pl.col("enip_name").is_not_null()).then(3)
+              .when(pl.col("broadcast_name").is_not_null()).then(4)
+              .when(pl.col("dns_name").is_not_null()).then(5)
+              .when(pl.col("network_scope") == "Public").then(6)
+              .otherwise(7)
+              .cast(pl.Int32)
+              .alias("name_confidence"),
+
             pl.col("has_mac").fill_null(False),
             pl.lit(0).cast(pl.Int32).alias("behavior_level") # Default to 0 (Unknown)
         ])

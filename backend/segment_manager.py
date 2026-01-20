@@ -36,14 +36,32 @@ class SegmentResolver:
         """
         Load segments from CSV. Scehma: Name, CIDR, Level.
         """
+        schema = {"Name": pl.String, "CIDR": pl.String, "Level": pl.Int32}
+        
         if segments_csv and os.path.exists(segments_csv):
             try:
-                # Enforce schema to prevent Type Errors (e.g. Name being inferred as Int)
-                self.segments_df = pl.read_csv(segments_csv, schema_overrides={"Name": pl.String, "CIDR": pl.String, "Level": pl.Int32})
-            except:
-                self.segments_df = pl.DataFrame(schema={"Name": pl.String, "CIDR": pl.String, "Level": pl.Int32})
+                # 1. Read without schema overrides first to check columns
+                # or just use read_csv and catch SchemaError or examine columns
+                df = pl.read_csv(segments_csv, ignore_errors=True)
+                
+                # 2. Check required columns
+                required = {"Name", "CIDR", "Level"}
+                if not required.issubset(set(df.columns)):
+                    print(f"Error: Missing columns in {segments_csv}. Required: {required}")
+                    return pl.DataFrame(schema=schema)
+                
+                # 3. Cast/Enforce data types
+                self.segments_df = df.select([
+                    pl.col("Name").cast(pl.String),
+                    pl.col("CIDR").cast(pl.String),
+                    pl.col("Level").cast(pl.Int32, strict=False).fill_null(0)
+                ])
+                
+            except Exception as e:
+                print(f"Error loading segments: {e}")
+                self.segments_df = pl.DataFrame(schema=schema)
         else:
-             self.segments_df = pl.DataFrame(schema={"Name": pl.String, "CIDR": pl.String, "Level": pl.Int32})
+             self.segments_df = pl.DataFrame(schema=schema)
         return self.segments_df
         
     def resolve_ip(self, ip_series):
@@ -58,6 +76,13 @@ class SegmentResolver:
         """
         if self.segments_df is None or self.segments_df.height == 0:
              return pl.Series([("Unknown", 0)] * len(ip_series), dtype=pl.Object)
+        # Schema for return
+        ret_schema = pl.Struct({
+            "Name": pl.String, 
+            "Level": pl.Int32, 
+            "Color": pl.String, 
+            "FontColor": pl.String
+        })
 
         # Convert DF to list of dicts for faster iteration
         segments = self.segments_df.to_dicts()
@@ -69,28 +94,73 @@ class SegmentResolver:
                 s['net'] = None
 
         def match_ip(ip_str):
+            # 1. Init
+            seg_name = "Unknown"
+            level = 0
+            bg = "#ffffff"
+            font = "#000000"
+            found = False
+            
+            if not ip_str:
+                return {"Name": seg_name, "Level": level, "Color": bg, "FontColor": font}
+
             try:
                 ip = ipaddress.ip_address(ip_str)
+                
+                # 2. Check Defined Segments
                 for s in segments:
                     if s['net'] and ip in s['net']:
-                        return (str(s['Name']), s['Level'])
+                        seg_name = str(s['Name'])
+                        level = s['Level']
+                        bg = self.PURDUE_COLORS.get(level, "#ffffff")
+                        # Font Contrast
+                        font = "#000000" if bg in ["#c6dbef", "#ffffff", "#a1d99b"] else "#ffffff"
+                        found = True
+                        break 
+                
+                # 3. Fallbacks if not found
+                if not found:
+                    is_special = False
+                    if ip.is_multicast:
+                        seg_name = "Multicast Range"
+                        is_special = True
+                    elif str(ip).endswith(".255") or str(ip) == "255.255.255.255":
+                        seg_name = "Broadcast"
+                        is_special = True
+                    elif ip.is_link_local:
+                        seg_name = "Link-Local"
+                        is_special = True
+                    elif ip.is_loopback:
+                        seg_name = "Loopback"
+                        is_special = True
+                    elif ip.version == 6:
+                        seg_name = "IPv6"
+                        is_special = True
+                        
+                    if is_special:
+                        bg = "#ffffff"
+                        font = "#ff0000"
+                        level = 4 # Default to Site Ops
+                    elif not ip.is_private:
+                        # Public Internet
+                        seg_name = "Internet"
+                        level = 8
+                        bg = self.PURDUE_COLORS.get(8, "#444444")
+                        font = "#ffffff"
+                    else:
+                        # Private Unknown
+                        seg_name = "Unknown"
+                        level = 0
+                        bg = "#ffffff"
+                        font = "#000000"
+
             except:
                 pass
-            return ("Unknown", 0)
+                
+            return {"Name": seg_name, "Level": level, "Color": bg, "FontColor": font}
 
         # Apply
-        # Polars map_elements returns a single Series of tuples/structs? 
-        # Easier to return Struct and split.
-        
-        # map_elements is slow for millions of rows. 
-        # Fast path: Group by raw IP, map unique IPs, then join back? 
-        # Yes, caller should handle unique deduplicaton if needed. 
-        # Here we assume ip_series is the column.
-        
-        # NOTE: For massive logs, we should optimize this lookup (RangeJoin or similar in DBs).
-        # In memory python:
-        
-        return ip_series.map_elements(lambda x: match_ip(x), return_dtype=pl.Object)
+        return ip_series.map_elements(lambda x: match_ip(x), return_dtype=ret_schema)
 
     def resolve_ip_single(self, ip_str):
         """
@@ -203,6 +273,10 @@ class SegmentResolver:
                 ip = ipaddress.ip_address(ip_str)
                 if ip.is_multicast or ip.is_loopback or ip.is_link_local or str(ip) == "255.255.255.255":
                     return None
+                
+                # Exclude Public IPs (Allow only Private)
+                if not ip.is_private:
+                     return None
                 
                 # Create /24
                 if ip.version == 4:
