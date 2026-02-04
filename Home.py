@@ -34,3 +34,8 @@ with col2:
         st.info("Please install Zeek (WSL) to use the Ingest feature.")
 
 st.info("👈 Select a module from the sidebar to begin.")
+
+# Sidebar Footer
+from utils import render_sidebar_stats
+render_sidebar_stats()
+

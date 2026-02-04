@@ -139,6 +139,50 @@ if active_file:
         except Exception as e:
              st.warning(f"⚠️ Process interrupted: {e}")
 
+        # Post-Processing: Generate DataFrames
+        if os.path.exists(zeek.logs_dir):
+            try:
+                # Initialize Engine for data loading
+                from backend.navv_analysis_engine import NavvAnalysisEngine
+                from backend.inventory_manager import InventoryHarmonizer
+                from backend.segment_manager import SegmentResolver
+                
+                # Check prerequisites (Files created by zeek)
+                conn_file = os.path.join(zeek.logs_dir, "conn.log")
+                if os.path.exists(conn_file):
+                    with st.spinner("Generating Analysis DataFrames (Polars)..."):
+                        # Managers
+                         inv = InventoryHarmonizer()
+                         # Ensure inventory loaded (try defaults)
+                         inv.ingest_model(
+                            inventory_csv="master_navv_inventory.csv" if os.path.exists("master_navv_inventory.csv") else "inventory.csv",
+                            conn_log=conn_file,
+                            dhcp_log=os.path.join(zeek.logs_dir, "dhcp.log"),
+                            dns_log=os.path.join(zeek.logs_dir, "dns.log")
+                         )
+                         
+                         seg = SegmentResolver()
+                         seg.load_segments("segments.csv")
+                         
+                         engine = NavvAnalysisEngine(inv, seg)
+                         
+                         # 1. Connection Summary (The main analysis DF)
+                         df_summary = engine.run_analysis(conn_file)
+                         st.session_state["df_connection_summary"] = df_summary
+                         st.session_state["analysis_df"] = df_summary.to_pandas() # Keep legacy for now
+                         
+                         # 2. Endpoints
+                         df_endpoints = engine.generate_endpoints_view(conn_file)
+                         st.session_state["df_endpoints"] = df_endpoints
+                         
+                         st.success("✅ Data Models Built & Cached")
+                         
+                         # Update Sidebar Stats Immediately (optional, if using session state)
+                         st.rerun()
+                         
+            except Exception as e:
+                st.error(f"Data Generation Failed: {e}")
+
 st.subheader("3. Log Quality Status")
 if os.path.exists(zeek.logs_dir):
     c1, c2 = st.columns(2)
@@ -250,3 +294,8 @@ st.markdown("---")
 if st.button("Clear Old Logs"):
     zeek.clear_logs()
     st.success("Logs cleared.")
+
+# Sidebar Footer
+from utils import render_sidebar_stats
+render_sidebar_stats()
+

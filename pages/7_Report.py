@@ -2,9 +2,15 @@ import streamlit as st
 import pandas as pd
 import io
 import os
+from utils import check_log_prerequisites
 
 st.set_page_config(page_title="Report Export", page_icon="📑", layout="wide")
 st.title("📑 Report Generation")
+
+if not check_log_prerequisites():
+    st.error("⚠️ No Zeek logs found. Please use the **Ingest** module to process a PCAP file first.")
+    st.stop()
+
 
 if 'analysis_df' not in st.session_state:
     st.warning("⚠️ No Analysis data found. Please run the **NAVV Analysis** first.")
@@ -56,3 +62,8 @@ if st.button("Generate Excel Report"):
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     st.success("Report Generated!")
+
+# Sidebar Footer
+from utils import render_sidebar_stats
+render_sidebar_stats()
+

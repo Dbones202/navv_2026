@@ -11,9 +11,15 @@ from backend.navv_analysis_engine import NavvAnalysisEngine
 from backend.inventory_manager import InventoryHarmonizer
 from backend.segment_manager import SegmentResolver
 from zeek_runner import ZeekRunner
+from utils import check_log_prerequisites
 
 st.set_page_config(page_title="Sankey Analysis", page_icon="📈", layout="wide")
 st.title("📈 Sankey Visualization (Builder)")
+
+if not check_log_prerequisites():
+    st.error("⚠️ No Zeek logs found. Please use the **Ingest** module to process a PCAP file first.")
+    st.stop()
+
 
 # Initialize
 zeek = ZeekRunner()
@@ -140,3 +146,8 @@ if 'sankey_df' in st.session_state:
         
     else:
         st.warning("⚠️ Missing 'src_segment' or 'src_level' columns. Please re-run analysis.")
+
+# Sidebar Footer
+from utils import render_sidebar_stats
+render_sidebar_stats()
+

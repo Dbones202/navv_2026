@@ -3,9 +3,15 @@ import polars as pl
 import os
 from backend.segment_manager import SegmentResolver
 from zeek_runner import ZeekRunner
+from utils import check_log_prerequisites
 
 st.set_page_config(page_title="Segment Manager", page_icon="🌐", layout="wide")
 st.title("🌐 Network Segmentation")
+
+if not check_log_prerequisites():
+    st.error("⚠️ No Zeek logs found. Please use the **Ingest** module to process a PCAP file first.")
+    st.stop()
+
 
 seg = SegmentResolver()
 zeek = ZeekRunner()
@@ -253,3 +259,8 @@ with st.expander("ℹ️ How it Works: Segmentation & Autodiscovery"):
     *   **2**: Basic Control
     *   **1**: Physical Process
     """)
+
+# Sidebar Footer
+from utils import render_sidebar_stats
+render_sidebar_stats()
+

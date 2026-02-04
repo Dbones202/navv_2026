@@ -39,8 +39,15 @@ class InventoryHarmonizer:
                 
                 manual_df = q.select(selects)
                 
-                # Ensure IP is string
-                manual_df = manual_df.with_columns(pl.col("ip").cast(pl.String))
+                # Ensure IP is string and cleanup manual_name
+                manual_df = manual_df.with_columns([
+                    pl.col("ip").cast(pl.String),
+                    # Cleanup: If Name == IP, it's not a manual override, it's a placeholder. Nullify it.
+                    pl.when(pl.col("manual_name") == pl.col("ip"))
+                    .then(None)
+                    .otherwise(pl.col("manual_name"))
+                    .alias("manual_name")
+                ])
             except Exception as e:
                 # print(f"Error loading inventory: {e}")
                 manual_df = pl.DataFrame(schema={"ip": pl.String, "manual_name": pl.String, "location": pl.String, "description": pl.String}).lazy()
@@ -426,11 +433,11 @@ class InventoryHarmonizer:
         ])
 
         # Feature: Segment-based Fallback Name
-        # "Unknown device in {Segment} network" or "Unknown device in Unknown Internal Network"
+        # "Unknown Device in {Segment}" or "Unknown Device in Unknown Internal Network"
         combined = combined.with_columns([
             pl.when((pl.col("segment") != "Unassigned") & (pl.col("segment").is_not_null()) & (pl.col("segment") != "Unknown"))
-            .then(pl.concat_str([pl.lit("Unknown device in "), pl.col("segment"), pl.lit(" network")]))
-            .otherwise(pl.lit("Unknown device in Unknown Internal Network"))
+            .then(pl.concat_str([pl.lit("Unknown Device in "), pl.col("segment")]))
+            .otherwise(pl.lit("Unknown Device in Unknown Internal Network"))
             .alias("segment_fallback_name")
         ])
 

@@ -10,9 +10,15 @@ from backend.navv_analysis_engine import NavvAnalysisEngine
 from backend.inventory_manager import InventoryHarmonizer
 from backend.segment_manager import SegmentResolver
 from zeek_runner import ZeekRunner
+from utils import check_log_prerequisites
 
 st.set_page_config(page_title="NAVV Analysis", page_icon="🕵️", layout="wide")
 st.title("🕵️ NAVV Traffic Analysis")
+
+if not check_log_prerequisites():
+    st.error("⚠️ No Zeek logs found. Please use the **Ingest** module to process a PCAP file first.")
+    st.stop()
+
 
 # Initialize
 zeek = ZeekRunner()
@@ -135,3 +141,8 @@ with st.expander("ℹ️ How it Works: Traffic Analysis & Enrichment"):
     *   **Sankey Diagram**: Shows the high-level volume of traffic flowing between **Zones** (e.g., "Site Operations" -> "Internet").
     *   **Traffic Table**: Detailed record of every conversation, with color-coded context for rapid risk assessment.
     """)
+
+# Sidebar Footer
+from utils import render_sidebar_stats
+render_sidebar_stats()
+

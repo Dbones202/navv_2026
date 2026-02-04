@@ -3,9 +3,15 @@ import os
 import glob
 import polars as pl
 from zeek_runner import ZeekRunner
+from utils import check_log_prerequisites
 
 st.set_page_config(page_title="Raw Logs", page_icon="📄", layout="wide")
 st.title("📄 Analysis: Raw Logs")
+
+if not check_log_prerequisites():
+    st.error("⚠️ No Zeek logs found. Please use the **Ingest** module to process a PCAP file first.")
+    st.stop()
+
 
 zeek = ZeekRunner()
 log_files = glob.glob(os.path.join(zeek.logs_dir, "*.log"))
@@ -63,3 +69,8 @@ if selected_log:
         st.error(f"Error reading log: {e}")
         with open(file_path, "r", encoding="utf-8", errors="replace") as f:
             st.text_area("Raw Content", f.read(), height=400)
+
+# Sidebar Footer
+from utils import render_sidebar_stats
+render_sidebar_stats()
+
